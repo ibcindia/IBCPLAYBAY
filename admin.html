@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>IBC Play BAY – Admin</title>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@700;800&family=DM+Sans:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top"><a class="brand" href="./">IBC Play <b>BAY</b> Admin</a><a href="./">View gallery</a></header>
+
+  <section class="panel" id="connect">
+    <h2>Connect to GitHub</h2>
+    <div class="row">
+      <div><label for="repo">Repository (owner/name)</label><input id="repo" placeholder="yourname/ibc-play-bay"></div>
+      <div><label for="token">Access token</label><input id="token" type="password" placeholder="github_pat_..."></div>
+    </div>
+    <p class="hint">The token stays in this browser only. Without it, nobody can upload or delete anything.</p>
+    <p><button class="primary" id="saveCfg">Connect</button> <button class="ghost" id="logout" hidden>Disconnect</button></p>
+    <div class="status" id="cStatus"></div>
+  </section>
+
+  <section class="panel" id="uploader" hidden>
+    <h2>Add a video</h2>
+    <label for="title">Title</label><input id="title">
+    <div class="row">
+      <div><label for="category">Category</label><input id="category" placeholder="Reality Show, Series, Music..."></div>
+      <div><label for="language">Language</label><input id="language" placeholder="Hindi, English, Marathi..."></div>
+    </div>
+    <label for="desc">Description</label><textarea id="desc" rows="3"></textarea>
+    <label for="source">Video source</label>
+    <select id="source"><option value="file">Upload a video file</option><option value="youtube">YouTube link</option><option value="link">Direct video link (.mp4)</option></select>
+    <div id="fileBox"><label for="file">Video file (.mp4, .webm)</label><input id="file" type="file" accept="video/mp4,video/webm">
+      <p class="hint">Keep each file under 50 MB. For longer episodes, use a YouTube or direct link.</p></div>
+    <div id="urlBox" hidden><label for="url">Link</label><input id="url" placeholder="https://"></div>
+    <label for="thumb">Thumbnail image (optional)</label><input id="thumb" type="file" accept="image/*">
+    <p><button class="primary" id="publish">Publish video</button></p>
+    <div class="status" id="uStatus" role="status"></div>
+  </section>
+
+  <section class="panel" id="manage" hidden>
+    <h2>Published videos</h2>
+    <div id="list"></div>
+  </section>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+const getCfg=()=>JSON.parse(localStorage.getItem('ibc_cfg')||'null');
+const esc=s=>String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const say=(el,t,c='')=>{el.textContent=t;el.className='status '+c};
+
+async function gh(path,opt={}){
+  const c=getCfg();
+  const r=await fetch(`https://api.github.com/repos/${c.repo}/${path}`,{...opt,headers:{Authorization:'Bearer '+c.token,Accept:'application/vnd.github+json','Content-Type':'application/json'}});
+  if(!r.ok&&r.status!==404){let m=r.statusText;try{m=(await r.json()).message}catch{}throw new Error(m)}
+  return r;
+}
+const getMeta=async p=>{const r=await gh(`contents/${p}?ref=${getCfg().branch}`);return r.status===404?null:r.json()};
+async function put(p,b64,msg,sha){
+  const body={message:msg,content:b64,branch:getCfg().branch};if(sha)body.sha=sha;
+  return (await gh('contents/'+p,{method:'PUT',body:JSON.stringify(body)})).json();
+}
+const toB64=f=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=()=>rej(new Error('Could not read file'));r.readAsDataURL(f)});
+const textB64=t=>{let s='';new TextEncoder().encode(t).forEach(b=>s+=String.fromCharCode(b));return btoa(s)};
+async function readVideos(){
+  const m=await getMeta('videos.json');
+  if(!m)return{list:[],sha:null};
+  const bin=atob(m.content.replace(/\n/g,''));
+  const txt=new TextDecoder().decode(Uint8Array.from(bin,c=>c.charCodeAt(0)));
+  return{list:JSON.parse(txt||'[]'),sha:m.sha};
+}
+const saveVideos=(list,sha,msg)=>put('videos.json',textB64(JSON.stringify(list,null,2)),msg,sha);
+const safe=n=>Date.now()+'-'+n.toLowerCase().replace(/[^a-z0-9.]+/g,'-');
+
+function show(on){['uploader','manage'].forEach(i=>$('#'+i).hidden=!on);$('#logout').hidden=!on}
+
+$('#saveCfg').onclick=async()=>{
+  const repo=$('#repo').value.trim(),token=$('#token').value.trim();
+  if(!repo||!token)return say($('#cStatus'),'Enter the repository and the token.','err');
+  try{
+    const r=await fetch('https://api.github.com/repos/'+repo,{headers:{Authorization:'Bearer '+token}});
+    if(!r.ok)throw new Error('Repository not found or token has no access.');
+    const j=await r.json();
+    if(!j.permissions||!j.permissions.push)throw new Error('This token cannot write to the repository. Give it Contents: Read and write.');
+    localStorage.setItem('ibc_cfg',JSON.stringify({repo,token,branch:j.default_branch}));
+    $('#token').value='';say($('#cStatus'),'Connected to '+repo,'ok');show(true);refresh();
+  }catch(e){say($('#cStatus'),e.message,'err')}
+};
+$('#logout').onclick=()=>{localStorage.removeItem('ibc_cfg');show(false);say($('#cStatus'),'Disconnected.')};
+$('#source').onchange=e=>{const f=e.target.value==='file';$('#fileBox').hidden=!f;$('#urlBox').hidden=f};
+
+$('#publish').onclick=async()=>{
+  const btn=$('#publish'),st=$('#uStatus');
+  const title=$('#title').value.trim(),type=$('#source').value;
+  const file=$('#file').files[0],url=$('#url').value.trim(),thumb=$('#thumb').files[0];
+  if(!title)return say(st,'Add a title.','err');
+  if(type==='file'&&!file)return say(st,'Choose a video file.','err');
+  if(type!=='file'&&!url)return say(st,'Paste the video link.','err');
+  if(file&&file.size>50*1024*1024)return say(st,'This file is over 50 MB. Use a YouTube or direct link instead.','err');
+  btn.disabled=true;
+  try{
+    let src=url,th='';
+    if(type==='file'){const p='videos/'+safe(file.name);say(st,'Uploading video…');await put(p,await toB64(file),'Add video: '+title);src=p}
+    if(thumb){const p='thumbs/'+safe(thumb.name);say(st,'Uploading thumbnail…');await put(p,await toB64(thumb),'Add thumbnail: '+title);th=p}
+    say(st,'Updating gallery…');
+    const {list,sha}=await readVideos();
+    list.unshift({id:'v'+Date.now(),title,category:$('#category').value.trim(),language:$('#language').value.trim(),desc:$('#desc').value.trim(),type,src,thumb:th,date:new Date().toISOString().slice(0,10)});
+    await saveVideos(list,sha,'Publish: '+title);
+    say(st,'Published. The gallery updates in about a minute.','ok');
+    ['title','category','language','desc','url'].forEach(i=>$('#'+i).value='');$('#file').value='';$('#thumb').value='';
+    refresh();
+  }catch(e){say(st,'Failed: '+e.message,'err')}
+  btn.disabled=false;
+};
+
+async function refresh(){
+  try{
+    const {list}=await readVideos();
+    $('#list').innerHTML=list.length?list.map(v=>`<div class="item"><div><strong>${esc(v.title)}</strong><div class="meta">${esc(v.category)} ${v.language?'• '+esc(v.language):''} • ${esc(v.date)}</div></div><button class="ghost" data-id="${esc(v.id)}">Delete</button></div>`).join(''):'<p class="meta">No videos yet.</p>';
+  }catch(e){$('#list').textContent='Could not load list: '+e.message}
+}
+$('#list').onclick=async e=>{
+  const b=e.target.closest('button');if(!b)return;
+  if(!confirm('Delete this video from the channel?'))return;
+  b.disabled=true;
+  try{
+    const {list,sha}=await readVideos();
+    const v=list.find(x=>x.id===b.dataset.id);
+    await saveVideos(list.filter(x=>x.id!==b.dataset.id),sha,'Remove: '+(v?v.title:''));
+    for(const p of [v&&v.type==='file'&&v.src,v&&v.thumb]){
+      if(!p)continue;const m=await getMeta(p);
+      if(m)await gh('contents/'+p,{method:'DELETE',body:JSON.stringify({message:'Delete file',sha:m.sha,branch:getCfg().branch})});
+    }
+    refresh();
+  }catch(err){alert('Failed: '+err.message);b.disabled=false}
+};
+
+const c=getCfg();if(c){$('#repo').value=c.repo;show(true);say($('#cStatus'),'Connected to '+c.repo,'ok');refresh()}
+</script>
+</body>
+</html>
